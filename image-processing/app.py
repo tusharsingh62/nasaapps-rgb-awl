@@ -177,75 +177,10 @@ def serve_layout():
                                 },
                                 accept="image/*",
                             ),
-                            drc.NamedInlineRadioItems(
-                                name="Selection Mode",
-                                short="selection-mode",
-                                options=[
-                                    {"label": " Rectangular", "value": "select"},
-                                    {"label": " Lasso", "value": "lasso"},
-                                ],
-                                val="select",
-                            ),
-                            drc.NamedInlineRadioItems(
-                                name="Image Display Format",
-                                short="encoding-format",
-                                options=[
-                                    {"label": " JPEG", "value": "jpeg"},
-                                    {"label": " PNG", "value": "png"},
-                                ],
-                                val="jpeg",
-                            ),
                         ]
                     ),
                     drc.Card(
                         [
-                            drc.CustomDropdown(
-                                id="dropdown-filters",
-                                options=[
-                                    {"label": "Blur", "value": "blur"},
-                                    {"label": "Contour", "value": "contour"},
-                                    {"label": "Detail", "value": "detail"},
-                                    {"label": "Enhance Edge", "value": "edge_enhance"},
-                                    {
-                                        "label": "Enhance Edge (More)",
-                                        "value": "edge_enhance_more",
-                                    },
-                                    {"label": "Emboss", "value": "emboss"},
-                                    {"label": "Find Edges", "value": "find_edges"},
-                                    {"label": "Sharpen", "value": "sharpen"},
-                                    {"label": "Smooth", "value": "smooth"},
-                                    {"label": "Smooth (More)", "value": "smooth_more"},
-                                ],
-                                searchable=False,
-                                placeholder="Basic Filter...",
-                            ),
-                            drc.CustomDropdown(
-                                id="dropdown-enhance",
-                                options=[
-                                    {"label": "Brightness", "value": "brightness"},
-                                    {"label": "Color Balance", "value": "color"},
-                                    {"label": "Contrast", "value": "contrast"},
-                                    {"label": "Sharpness", "value": "sharpness"},
-                                ],
-                                searchable=False,
-                                placeholder="Enhance...",
-                            ),
-                            html.Div(
-                                id="div-enhancement-factor",
-                                children=[
-                                    f"Enhancement Factor:",
-                                    html.Div(
-                                        children=dcc.Slider(
-                                            id="slider-enhancement-factor",
-                                            min=0,
-                                            max=2,
-                                            step=0.1,
-                                            value=1,
-                                            updatemode="drag",
-                                        )
-                                    ),
-                                ],
-                            ),
                             html.Div(
                                 id="button-group",
                                 children=[
@@ -398,17 +333,6 @@ def apply_actions_on_image(session_id, action_stack, filename, image_signature):
 
 
 @app.callback(
-    Output("interactive-image", "figure"),
-    [Input("radio-selection-mode", "value")],
-    [State("interactive-image", "figure")],
-)
-def update_selection_mode(selection_mode, figure):
-    if figure:
-        figure["layout"]["dragmode"] = selection_mode
-    return figure
-
-
-@app.callback(
     Output("graph-histogram-colors", "figure"), [Input("interactive-image", "figure")]
 )
 def update_histogram(figure):
@@ -419,6 +343,8 @@ def update_histogram(figure):
 
     return utils.show_histogram(im_pil)
 
+undo_clicks_cache = None
+n_clicks_cache = None
 
 @app.callback(
     Output("div-interactive-image", "children"),
@@ -429,12 +355,7 @@ def update_histogram(figure):
     ],
     [
         State("interactive-image", "selectedData"),
-        State("dropdown-filters", "value"),
-        State("dropdown-enhance", "value"),
-        State("slider-enhancement-factor", "value"),
         State("upload-image", "filename"),
-        State("radio-selection-mode", "value"),
-        State("radio-encoding-format", "value"),
         State("div-storage", "children"),
         State("session-id", "children"),
     ],
@@ -443,17 +364,14 @@ def update_graph_interactive_image(
     content,
     undo_clicks,
     n_clicks,
-    # new_win_width,
     selectedData,
-    filters,
-    enhance,
-    enhancement_factor,
     new_filename,
-    dragmode,
-    enc_format,
     storage,
     session_id,
 ):
+    global undo_clicks_cache
+    global n_clicks_cache
+
     t_start = time.time()
 
     # Retrieve information saved in storage, which is a dict containing
@@ -467,59 +385,41 @@ def update_graph_interactive_image(
     # the same otherwise.
     storage = undo_last_action(undo_clicks, storage)
 
-    # If a new file was uploaded (new file name changed)
-    if new_filename and new_filename != filename:
-        print("if part")
-        print(new_filename)
-        print(filename)
-        # Replace filename
-        if DEBUG:
-            print(filename, "replaced by", new_filename)
+    if DEBUG:
+        print(filename, "replaced by", new_filename)
+        print(undo_clicks)
+        print(n_clicks)
+        print(undo_clicks_cache)
+        print(n_clicks_cache)
 
-        # Update the storage dict
-        storage["filename"] = new_filename
+    # Update the storage dict
+    storage["filename"] = new_filename
 
-        # Parse the string and convert to pil
-        string = content.split(";base64,")[-1]
-        # im_pil = drc.b64_to_pil(string)
+    # Parse the string and convert to pil
+    string = content.split(";base64,")[-1]
+
+    im_pil = None
+    if n_clicks != n_clicks_cache:
+        n_clicks_cache = n_clicks
         im_pil = Image.open("images/" + "g_" + new_filename)
-
-        # Update the image signature, which is the first 200 b64 characters
-        # of the string encoding
-        storage["image_signature"] = string[:200]
-
-        # Posts the image string into the Bucketeer Storage (which is hosted
-        # on S3)
-        store_image_string(string, session_id)
-        if DEBUG:
-            print(new_filename, "added to Bucketeer S3.")
-
-        # Resets the action stack
-        storage["action_stack"] = []
-
-    # If an operation was applied (when the filename wasn't changed)
     else:
-        # Add actions to the action stack (we have more than one if filters
-        # and enhance are BOTH selected)
-        if filters:
-            type = "filter"
-            operation = filters
-            add_action_to_stack(storage["action_stack"], operation, type, selectedData)
+        im_pil = drc.b64_to_pil(string)
 
-        if enhance:
-            type = "enhance"
-            operation = {
-                "enhancement": enhance,
-                "enhancement_factor": enhancement_factor,
-            }
-            add_action_to_stack(storage["action_stack"], operation, type, selectedData)
+    print(im_pil)
 
-        print("else part")
-        print(filename)
-        # Apply the required actions to the picture, using memoized function
-        im_pil = apply_actions_on_image(
-            session_id, storage["action_stack"], filename, image_signature
-        )
+
+    # Update the image signature, which is the first 200 b64 characters
+    # of the string encoding
+    storage["image_signature"] = string[:200]
+
+    # Posts the image string into the Bucketeer Storage (which is hosted
+    # on S3)
+    store_image_string(string, session_id)
+    if DEBUG:
+        print(new_filename, "added to Bucketeer S3.")
+
+    # Resets the action stack
+    storage["action_stack"] = []
 
     t_end = time.time()
     if DEBUG:
@@ -529,8 +429,8 @@ def update_graph_interactive_image(
         drc.InteractiveImagePIL(
             image_id="interactive-image",
             image=im_pil,
-            enc_format=enc_format,
-            dragmode=dragmode,
+            enc_format='png',
+            dragmode='select',
             verbose=DEBUG,
         ),
         html.Div(
@@ -539,37 +439,6 @@ def update_graph_interactive_image(
     ]
 
 
-# Show/Hide Callbacks
-@app.callback(
-    Output("div-enhancement-factor", "style"),
-    [Input("dropdown-enhance", "value")],
-    [State("div-enhancement-factor", "style")],
-)
-def show_slider_enhancement_factor(value, style):
-    # If any enhancement is selected
-    if value:
-        style["display"] = "block"
-    else:
-        style["display"] = "none"
-
-    return style
-
-
-# Reset Callbacks
-@app.callback(
-    Output("dropdown-filters", "value"), [Input("button-run-operation", "n_clicks")]
-)
-def reset_dropdown_filters(_):
-    return None
-
-
-@app.callback(
-    Output("dropdown-enhance", "value"), [Input("button-run-operation", "n_clicks")]
-)
-def reset_dropdown_enhance(_):
-    return None
-
-
 # Running the server
 if __name__ == "__main__":
-    app.run_server(debug=True)
+    app.run_server(debug=False)
